@@ -12,10 +12,28 @@
   <packaging>jar</packaging>
   <version>4.0</version>
   <name>Chapter 6: Developing a MapReduce Application</name>
+
+    <repositories>
+        <repository>
+            <id>my-repo1</id>
+            <name>mvn repo</name>
+            <url>https://mvnrepository.com/artifact/org.apache.mrunit/</url>
+        </repository>
+
+    </repositories>
+
   <dependencies>
     <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
+    </dependency>
+    <!-- https://mvnrepository.com/artifact/org.apache.mrunit/mrunit -->
+    <dependency>
+      <groupId>org.apache.mrunit</groupId>
+      <artifactId>mrunit</artifactId>
+      <version>1.1.0</version>
+        <classifier>hadoop2</classifier>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 </project>
