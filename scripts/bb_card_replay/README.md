@@ -71,6 +71,12 @@ After either path finishes, run the printed Scala in EMR Studio:
 3. Select **Spark** kernel and wait for **Spark \| Idle**
 4. Paste/run the configure cell, then the upsert cells
 
+The Scala job prints:
+
+- **HUDI BEFORE** — matched cards’ `requesttype` / `requeststatus` / `requestdate` / commit time
+- **HUDI AFTER** — same view after upsert (expect `addCards` / `NOT_SENT`)
+- **`[COUNTER]` lines** — change counts (see below)
+
 Or reprint the script anytime:
 
 ```bash
@@ -78,6 +84,27 @@ python3 replay_bb_cards.py print-scala
 ```
 
 Companion file: `hudi_bb_card_upsert.scala`
+
+## Counters
+
+Python prep (`from-query` / `from-list`) logs:
+
+| Counter | Meaning |
+|---------|---------|
+| `cards_in` | Distinct cards from query or static list |
+| `cards_uploaded` | Cards written to S3 CSV |
+| `athena_table_created` | Whether replay table was created |
+
+Scala HUDI job logs:
+
+| Counter | Meaning |
+|---------|---------|
+| `csv_distinct_cards` | Cards read from S3 CSV |
+| `hudi_matched_before` | Cards found in HUDI before upsert |
+| `cards_not_in_hudi` | CSV cards with no HUDI row (not updated) |
+| `rows_to_upsert` | Rows written in the upsert |
+| `hudi_matched_after` | Cards found in HUDI after upsert |
+| `hudi_ready_addCards_NOT_SENT` | Cards now set to `addCards` / `NOT_SENT` |
 
 ## Day-after checks
 

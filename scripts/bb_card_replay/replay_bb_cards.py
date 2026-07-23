@@ -189,6 +189,7 @@ WHERE NOT EXISTS (
 
 
 def scala_script() -> str:
+    """EMR Studio Scala: before/after HUDI views + change counters."""
     return f"""%%configure -f
 {{
     "conf": {{
@@ -202,17 +203,32 @@ import org.apache.spark.sql.functions._
 
 val csvPath = "{CSV_S3}"
 val csvDf = spark.read.option("header", "true").csv(csvPath).select(col("card10").as("cardid")).distinct()
+val csvCount = csvDf.count()
+println(s"[COUNTER] csv_distinct_cards=$csvCount")
 
 val hudiBasePath = "{HUDI_BASE}"
 val hudiDf = spark.read.format("hudi").load(hudiBasePath)
 val hudiSchema = hudiDf.schema
 val baseDf = spark.read.format("hudi").schema(hudiSchema).load(hudiBasePath)
 
-val matchedDf = baseDf.join(broadcast(csvDf), Seq("cardid"), "inner")
+val viewCols = Seq("cardid", "requesttype", "requeststatus", "requestdate", "_hoodie_commit_time")
+
+// ---- BEFORE upsert ----
+val beforeDf = baseDf.join(broadcast(csvDf), Seq("cardid"), "inner")
+val beforeCount = beforeDf.count()
+val notInHudiCount = csvCount - beforeCount
+println(s"[COUNTER] hudi_matched_before=$beforeCount")
+println(s"[COUNTER] cards_not_in_hudi=$notInHudiCount")
+println("=== HUDI BEFORE (matched cards) ===")
+beforeDf.select(viewCols.map(col): _*).orderBy(col("cardid")).show(200, false)
+
+val matchedDf = beforeDf
 val updatedDf = matchedDf
   .withColumn("requestType", lit("addCards"))
   .withColumn("requestStatus", lit("NOT_SENT"))
   .withColumn("requestDate", current_timestamp())
+val upsertCount = updatedDf.count()
+println(s"[COUNTER] rows_to_upsert=$upsertCount")
 
 (updatedDf.write
   .format("hudi")
@@ -223,14 +239,29 @@ val updatedDf = matchedDf
   .mode("append")
   .save(hudiBasePath)
 )
+println("[COUNTER] hudi_upsert_write=done")
 
-(spark.read
-  .format("hudi")
-  .load(hudiBasePath)
-  .orderBy(desc("_hoodie_commit_time"))
-  .select("cardid", "requesttype", "requeststatus", "_hoodie_commit_time")
-  .show(50, false)
-)
+// ---- AFTER upsert ----
+val afterBase = spark.read.format("hudi").load(hudiBasePath)
+val afterDf = afterBase.join(broadcast(csvDf), Seq("cardid"), "inner")
+val afterCount = afterDf.count()
+val afterReady = afterDf.filter(
+  lower(col("requesttype")) === "addcards" &&
+  upper(col("requeststatus")) === "NOT_SENT"
+).count()
+println(s"[COUNTER] hudi_matched_after=$afterCount")
+println(s"[COUNTER] hudi_ready_addCards_NOT_SENT=$afterReady")
+println(s"[COUNTER] hudi_changed_or_ready=$afterReady")
+println("=== HUDI AFTER (matched cards) ===")
+afterDf.select(viewCols.map(col): _*).orderBy(col("cardid")).show(200, false)
+
+println("=== SUMMARY ===")
+println(s"[COUNTER] csv_distinct_cards=$csvCount")
+println(s"[COUNTER] hudi_matched_before=$beforeCount")
+println(s"[COUNTER] rows_to_upsert=$upsertCount")
+println(s"[COUNTER] hudi_matched_after=$afterCount")
+println(s"[COUNTER] hudi_ready_addCards_NOT_SENT=$afterReady")
+println(s"[COUNTER] cards_not_in_hudi=$notInHudiCount")
 """
 
 
@@ -274,6 +305,26 @@ def write_csv(path: Path, headers: Sequence[str], rows: Sequence[Sequence[str]])
         w.writerow(headers)
         w.writerows(rows)
     return len(rows)
+
+
+def distinct_card10_count(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> int:
+    if "card10" not in headers:
+        return len(rows)
+    idx = list(headers).index("card10")
+    return len({r[idx] for r in rows if idx < len(r) and r[idx]})
+
+
+def log_counter(name: str, value: Any) -> None:
+    log(f"[COUNTER] {name}={value}")
+
+
+def log_prep_summary(path_name: str, cards_in: int, cards_uploaded: int, table_created: bool) -> None:
+    log("=== PREP SUMMARY ===")
+    log_counter("path", path_name)
+    log_counter("cards_in", cards_in)
+    log_counter("cards_uploaded", cards_uploaded)
+    log_counter("athena_table_created", str(table_created).lower())
+    log("HUDI change counters (matched_before / rows_to_upsert / ready_after) are printed by the Scala job.")
 
 
 def parse_static_cards(cards: Optional[str], cards_file: Optional[str]) -> List[str]:
@@ -389,18 +440,27 @@ def cmd_from_query(args: argparse.Namespace) -> int:
     qid = run_athena(athena, sql, args.athena_output)
     log(f"QueryExecutionId: {qid}")
     headers, rows = fetch_rows(athena, qid)
+    cards_in = distinct_card10_count(headers, rows)
+    log_counter("athena_rows", len(rows))
+    log_counter("cards_in", cards_in)
 
     local = Path(args.local_csv)
     write_csv(local, headers, rows)
     log(f"Wrote {len(rows)} rows -> {local}")
     if not rows:
         log("No cards found; stopping.")
+        log_prep_summary("from-query", 0, 0, False)
         return 0
 
     upload_and_copy_replay(s3, local, replay_date)
+    log_counter("cards_uploaded", cards_in)
 
+    table_created = False
     if not args.skip_table:
         create_replay_table(athena, s3, replay_date, args.athena_output, args.table_name)
+        table_created = True
+
+    log_prep_summary("from-query", cards_in, cards_in, table_created)
 
     if not args.skip_scala:
         print_hudi_next_steps()
@@ -413,7 +473,7 @@ def cmd_from_query(args: argparse.Namespace) -> int:
 def cmd_from_list(args: argparse.Namespace) -> int:
     cards = parse_static_cards(args.cards, args.cards_file)
     log("=== Path 2: from-list (static cards, no Athena discovery) ===")
-    log(f"Cards: {len(cards)}")
+    log_counter("cards_in", len(cards))
 
     local = Path(args.local_csv)
     write_csv(local, ["card10"], [[c] for c in cards])
@@ -425,6 +485,7 @@ def cmd_from_list(args: argparse.Namespace) -> int:
             log(f"  {c}")
         if len(cards) > 20:
             log(f"  ... +{len(cards) - 20} more")
+        log_prep_summary("from-list", len(cards), 0, False)
         return 0
 
     sess = session(args.profile, args.region)
@@ -432,12 +493,18 @@ def cmd_from_list(args: argparse.Namespace) -> int:
     replay_date = parse_date(args.replay_date) if args.replay_date else today()
 
     upload_and_copy_replay(s3, local, replay_date)
+    log_counter("cards_uploaded", len(cards))
 
+    table_created = False
     if not args.skip_table:
         if not args.athena_output:
             raise Error("--athena-output is required to create the Athena table (or pass --skip-table)")
         athena = sess.client("athena")
         create_replay_table(athena, s3, replay_date, args.athena_output, args.table_name)
+        table_created = True
+
+    log_prep_summary("from-list", len(cards), len(cards), table_created)
+    log("Scala job will show HUDI BEFORE/AFTER views for these cards.")
 
     if not args.skip_scala:
         print_hudi_next_steps()
