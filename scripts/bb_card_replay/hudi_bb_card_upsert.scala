@@ -1,11 +1,7 @@
-// BB card HUDI upsert for EMR Studio Workspace (Spark kernel).
-// Prerequisites:
-//   1. Workbook attached to EMR Serverless app with role:
-//      sms-card-enrichment-serverless-emr-runtime-role-prod
-//   2. cards2replay.csv already uploaded to S3 (step 1 of replay_bb_cards.py)
-//
-// Paste into a notebook cell after Spark is Idle, or run via:
-//   python3 replay_bb_cards.py print-scala
+// EMR Studio Workspace (Spark kernel) HUDI upsert for BB card replay.
+// Attach EMR Serverless app with role:
+//   sms-card-enrichment-serverless-emr-runtime-role-prod
+// Wait for Spark | Idle, then run.
 
 %%configure -f
 {
@@ -32,8 +28,6 @@ val updatedDf = matchedDf
   .withColumn("requestStatus", lit("NOT_SENT"))
   .withColumn("requestDate", current_timestamp())
 
-println(s"Cards matched for upsert: ${matchedDf.count()}")
-
 (updatedDf.write
   .format("hudi")
   .option("hoodie.datasource.write.operation", "upsert")
@@ -44,7 +38,6 @@ println(s"Cards matched for upsert: ${matchedDf.count()}")
   .save(hudiBasePath)
 )
 
-// Optional verification after job completes:
 (spark.read
   .format("hudi")
   .load(hudiBasePath)
