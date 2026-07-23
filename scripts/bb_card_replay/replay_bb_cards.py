@@ -491,12 +491,6 @@ paths:
     q.add_argument("--sample-eq", action="store_true", help="Use sampleid = '05' instead of <>")
     q.set_defaults(func=cmd_from_query)
 
-    # keep old name as alias
-    d = sub.add_parser("discover", help=argparse.SUPPRESS)
-    add_common_prep_args(d)
-    d.add_argument("--sample-eq", action="store_true")
-    d.set_defaults(func=cmd_from_query)
-
     lst = sub.add_parser("from-list", help="Path 2: static cards -> CSV/S3 -> table -> HUDI Scala")
     add_common_prep_args(lst)
     lst.add_argument("--cards", help="Comma-separated card10 values")
